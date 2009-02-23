@@ -176,8 +176,30 @@ EOS;
 
 $result = mysql_query($sql);
 
+
+/**
+ * Flatten a modified pre-order traversal structure
+ * into the Drupal form.
+ * @param 
+ * @return (string) a "node's" full path in Drupal notation
+ */
+function flatpot($lft, $rht, $indent, $current = '')
+{
+  $sql = "SELECT lft, rht, indent
+    FROM gl_comments
+    WHERE lft < $lft AND rht > $rht
+    ORDER BY lft ASC";
+  $result = mysql_query($sql);
+  while ($row = mysql_fetch_assoc($result)) {
+    $path = $current .
+    $out .= flatpot($row['lft'], $row['rht'], $row['indent'], $path);
+  }
+  return $out;
+}
+
 /**
  * Convert GL "pre-order traversal" to Drupal "notation"
+ * http://www.sitepoint.com/article/hierarchical-data-database/2/
  * Since we order by lft, we know that the next row always comes "after" the current one.
  * We only have to determine if it's a child or a sibling, which we should get from the indent.
  * 1	2	0	01/
@@ -187,8 +209,8 @@ $result = mysql_query($sql);
  * 9	10	0	03/
  */
 $sid = 0;
-while ($row = mysql_fetch_array($result)) {
-  
+while ($row = mysql_fetch_array($result))
+{  
   // Process these by chunks of "stories"
   if ($sid != $row['sid']) {
     $sid = $row['sid'];
@@ -222,7 +244,7 @@ while ($row = mysql_fetch_array($result)) {
 	  '{$row['ipaddress']}', {$row['date']}, 0, 1, '{$thread}',
 	  '{$row['username']}', '{$row['email']}')";
 	  
-	query($insert, "Inserting comment thread $thread");
+//	query($insert, "Inserting comment thread $thread");
 	
 }
 

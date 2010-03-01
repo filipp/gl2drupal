@@ -2,18 +2,22 @@
 <?php
 
 /**
- *	gl2drupal.php
- *	@author filipp@mac.com
- *  @version 20081019
- *  @todo
- *    - http://drupal.org/node/132202
- *    - drupal.history?
- *	Import Geeklog users, stories, comments, forums, polls and downloads
- *  afp548.com modules: Forum, Search, Profile
- *  11.11.08 user privileges (authenticated, admin)
- *  17.11.08 working on threading
- *  18.12.08 forum posts and comments
+ * gl2drupal.php
+ * Convert Geeklog site to Drupal
+ * @author filipp@mac.com
+ * @version 20081019
+ * @todo
+ * - http://drupal.org/node/132202
+ * - drupal.history?
+ * Import Geeklog users, stories, comments, forums, polls and downloads
+ * afp548.com modules: Forum, Search, Profile
+ * 11.11.08 user privileges (authenticated, admin)
+ * 17.11.08 working on threading
+ * 18.12.08 forum posts and comments
  */
+
+ini_set('display_errors', 'On');
+error_reporting(E_ALL|E_STRICT);
 
 // All arguments are mandatory
 $args = array(
@@ -34,13 +38,13 @@ foreach ($args as $k => $v) {
 }
 
 $dbpw       = $opts['p'];
-$dbhost     = $opts['h'];
+$dbhost     = $opts['h'] . ":/Applications/MAMP/tmp/mysql/mysql.sock";
 $dbuser     = $opts['u'];
 $drupal_db  = $opts['d'];
 $geeklog_db = $opts['g'];
-
 $gl_tbl_prefix = "gl_";
-$db = mysql_connect($dbhost, $dbuser, $dbpw) or die(mysql_error() . "\n");
+
+$db = mysql_connect($dbhost, $dbuser, $dbpw) or exit(mysql_error() . "\n");
 
 // Add users
 mysql_query("DELETE FROM {$drupal_users}.users");
@@ -103,6 +107,7 @@ mysql_query("ALTER TABLE {$geeklog_db}.{$gl_tbl_prefix}stories DROP PRIMARY KEY"
 $sql = "ALTER TABLE {$geeklog_db}.{$gl_tbl_prefix}stories ADD `idx` INT AUTO_INCREMENT PRIMARY KEY";
 mysql_query($sql);
 
+// Clear all previous content
 mysql_query("DELETE FROM {$drupal_db}.node");
 
 $sql =<<<EOS
@@ -118,7 +123,7 @@ INSERT INTO {$drupal_db}.node
 		UNIX_TIMESTAMP(date),
 		2,
 		1
-		FROM geeklog.{$gl_tbl_prefix}stories);
+		FROM {$geeklog_db}.{$gl_tbl_prefix}stories);
 EOS;
 
 query($sql, "Importing headlines");
@@ -138,7 +143,7 @@ INSERT INTO {$drupal_db}.node_revisions
 		FROM {$geeklog_db}.{$gl_tbl_prefix}stories)
 EOS;
 
-query( $sql, "Importing stories" );
+query($sql, "Importing stories");
 
 /**
  * Import article comments
@@ -153,6 +158,8 @@ query( $sql, "Importing stories" );
  *    02.00/      -> First comment to the second comment
  *    02.00.00/   -> Second comment to the first comment of the second comment
  */
+ 
+// Clear all old comments
 mysql_query("DELETE FROM {$drupal_db}.comments");
 
 $sql =<<<EOS
@@ -171,35 +178,17 @@ SELECT pid,
   FROM {$geeklog_db}.{$gl_tbl_prefix}comments, {$geeklog_db}.{$gl_tbl_prefix}stories, {$geeklog_db}.{$gl_tbl_prefix}users
   WHERE {$gl_tbl_prefix}stories.sid = {$gl_tbl_prefix}comments.sid
     AND {$gl_tbl_prefix}users.uid = {$gl_tbl_prefix}comments.uid
-  ORDER BY {$gl_tbl_prefix}comments.sid, {$gl_tbl_prefix}comments.lft ASC
+    AND {$gl_tbl_prefix}comments.type = 'article'
+  ORDER BY {$gl_tbl_prefix}comments.sid, {$gl_tbl_prefix}comments.cid ASC
+/*  ORDER BY {$gl_tbl_prefix}comments.sid, {$gl_tbl_prefix}comments.lft ASC*/
 EOS;
 
 $result = mysql_query($sql);
 
-
 /**
- * Flatten a modified pre-order traversal structure
- * into the Drupal form.
- * @param 
- * @return (string) a "node's" full path in Drupal notation
- */
-function flatpot($lft, $rht, $indent, $current = '')
-{
-  $sql = "SELECT lft, rht, indent
-    FROM gl_comments
-    WHERE lft < $lft AND rht > $rht
-    ORDER BY lft ASC";
-  $result = mysql_query($sql);
-  while ($row = mysql_fetch_assoc($result)) {
-    $path = $current .
-    $out .= flatpot($row['lft'], $row['rht'], $row['indent'], $path);
-  }
-  return $out;
-}
-
-/**
- * Convert GL "pre-order traversal" to Drupal "notation"
+ * Convert GL "pre-order traversal" to Drupal's "vancode"
  * http://www.sitepoint.com/article/hierarchical-data-database/2/
+ * http://drupal.org/node/97327
  * Since we order by lft, we know that the next row always comes "after" the current one.
  * We only have to determine if it's a child or a sibling, which we should get from the indent.
  * 1	2	0	01/
@@ -210,8 +199,45 @@ function flatpot($lft, $rht, $indent, $current = '')
  */
 $sid = 0;
 while ($row = mysql_fetch_array($result))
-{  
-  // Process these by chunks of "stories"
+{
+  // parts of this borrowed from Drupal's comment.module
+/*
+  // pid == 0 means comment is top level (no parent)
+  if ($row['pid'] == 0) {
+    $sql = "SELECT MAX(thread) FROM {$drupal_db}.comments WHERE nid = {$row['idx']}";
+    $max = mysql_result(mysql_query($sql), 0);
+    // Strip the "/" from the end of the thread.
+    $max = rtrim($max, '/');
+    // Finally, build the thread field for this new comment.
+    $thread = int2vancode(vancode2int($max) + 1) .'/';
+//    $sql = "SELECT MAX(thread) FROM {$drupal_db}.comments WHERE thread LIKE '%s.%%' AND nid = %d";
+  } else {
+    // This comment has a parent
+    $sql = "SELECT `thread` FROM {$drupal_db}.comments WHERE cid = {$row['pid']}";
+    $parent = mysql_result(mysql_query($sql), 0);
+    
+    // Get the max value in _this_ thread.
+    $max = mysql_result(mysql_query("SELECT MAX(thread)
+    FROM {comments} WHERE thread LIKE '{$parent}.%%' AND nid = {$row['idx']}"), 0);
+    if ($max == '') {
+      // First child of this parent.
+      $thread = $parent.'.'. int2vancode(0) .'/';
+    } else {
+      // Strip the "/" at the end of the thread.
+      $max = rtrim($max, '/');
+
+      // We need to get the value at the correct depth.
+      $parts = explode('.', $max);
+      $parent_depth = count(explode('.', $parent));
+      $last = $parts[$parent_depth];
+      
+      // Finally, build the thread field for this new comment.
+      $thread = $parent.'.'. int2vancode(vancode2int($last) + 1) .'/';
+    }
+  }
+*/
+
+  // Process these as chunks of "stories"
   if ($sid != $row['sid']) {
     $sid = $row['sid'];
     $indent = (int) $row['indent'];
@@ -230,9 +256,9 @@ while ($row = mysql_fetch_array($result))
   print_r($t);
   // Build the thread representation
 //  foreach ($)
-  foreach($t as $k => $v) {
-    $thread .= str_pad($k)
-  }
+//  foreach($t as $k => $v) {
+//    $thread .= str_pad($k)
+//  }
 //  $thread = $index . str_repeat(".{$index}", $indent) . '/';
   $thread = implode('.', $t) . '/';
   $comment = mysql_real_escape_string($row['comment']);
@@ -243,10 +269,10 @@ while ($row = mysql_fetch_array($result))
 	VALUES ({$row['pid']}, {$row['idx']}, {$row['uid']}, '$subject', '$comment',
 	  '{$row['ipaddress']}', {$row['date']}, 0, 1, '{$thread}',
 	  '{$row['username']}', '{$row['email']}')";
-	  
-//	query($insert, "Inserting comment thread $thread");
-	
+	query($insert, "Inserting comment thread $thread");
+echo "{$thread}\n";
 }
+//exit();
 
 // Remap Anonymous user
 $sql = "UPDATE {$drupal_db}.comments SET `uid` = 0 WHERE `uid` = 1";
@@ -267,7 +293,7 @@ INSERT INTO {$drupal_db}.node_comment_statistics
 		GROUP BY {$gl_tbl_prefix}stories.idx)
 EOS;
 
-query( $sql, "Generating story comment counts" );
+query($sql, "Generating story comment counts");
 
 // Restore forum comment coounts
 // Without this forum posts don't show up at all
@@ -438,4 +464,52 @@ function result( $action ) {
 	return "$out $result\n";
 }
 
+/**
+ * Flatten a modified pre-order traversal structure
+ * into the Drupal form.
+ * @param [string] $lft
+ * @param (string) $rht
+ * @param (string) $indent
+ * @param (string) $current the current path
+ * @return (string) a "node's" full path in Drupal notation
+ */
+function flatpot($lft, $rht, $indent, $current = '')
+{
+  $sql = "SELECT lft, rht, indent
+    FROM gl_comments
+    WHERE lft < $lft AND rht > $rht
+    ORDER BY lft ASC";
+  $result = mysql_query($sql);
+  while ($row = mysql_fetch_assoc($result)) {
+    $path = $current .
+    $out .= flatpot($row['lft'], $row['rht'], $row['indent'], $path);
+  }
+  return $out;
+}
+
+/**
+ * Generate vancode.
+ *
+ * Consists of a leading character indicating length, followed by N digits
+ * with a numerical value in base 36. Vancodes can be sorted as strings
+ * without messing up numerical order.
+ *
+ * It goes:
+ * 00, 01, 02, ..., 0y, 0z,
+ * 110, 111, ... , 1zy, 1zz,
+ * 2100, 2101, ..., 2zzy, 2zzz,
+ * 31000, 31001, ...
+ */
+function int2vancode($i = 0) {
+  $num = base_convert((int)$i, 10, 36);
+  $length = strlen($num);
+  return chr($length + ord('0') - 1) . $num;
+}
+
+/**
+ * Decode vancode back to an integer.
+ */
+function vancode2int($c = '00') {
+  return base_convert(substr($c, 1), 36, 10);
+}
 ?>
